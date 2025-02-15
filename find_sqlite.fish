@@ -1,42 +1,103 @@
 #!/usr/bin/env fish
 
-# Check if a bundle identifier is provided
-if not set -q argv[1]
-    echo "Usage: $argv[0] <bundle-identifier>"
+function print_usage
+    echo "Usage: $argv[0] [-d] <bundle-identifier>"
+    echo "Options:"
+    echo "  -d    Open Documents directory instead of SQLite location"
+    echo "Example: $argv[0] com.example.app    # finds SQLite location"
+    echo "         $argv[0] -d com.example.app # opens Documents directory"
+end
+
+# Parse arguments
+set -l open_documents 0
+set -l bundle_id ""
+
+for arg in $argv
+    switch $arg
+        case -h --help
+            print_usage
+            exit 0
+        case -d
+            set open_documents 1
+        case '*'
+            set bundle_id $arg
+    end
+end
+
+if test -z "$bundle_id"
+    print_usage
     exit 1
 end
 
-set -l bundle_identifier $argv[1]
+# Get the booted simulator
+set -l device_id (xcrun simctl list devices | string match -r '.*Booted.*' | string match -r '[A-Fa-f0-9-]{36}' | head -1)
 
-# Identify the active iOS Simulator
-set -l active_simulator (xcrun simctl list devices | grep '(Booted)' | awk -F '[()]' '{print $2}')
-
-# Check if an active simulator was found
-if not test -n "$active_simulator"
-    echo "No active iOS Simulator found."
+if test -z "$device_id"
+    echo "No booted simulator found"
     exit 1
 end
 
-# Find the app's container directory for the specified bundle identifier
-set -l container_directory (xcrun simctl get_app_container $active_simulator $bundle_identifier data)
+# Try the primary method first
+set -l container_path (xcrun simctl get_app_container $device_id $bundle_id data)
 
-# Construct the path to the Library/Application Support directory
-set -l app_support_directory "$container_directory/Library/Application Support"
+if test $status -eq 0
+    if test $open_documents -eq 1
+        set -l docs_path "$container_path/Documents"
+        if test -d $docs_path
+            echo "Opening Documents directory..."
+            open "$docs_path"
+            exit 0
+        else
+            echo "Documents directory not found at: $docs_path"
+            exit 1
+        end
+    else
+        # Common locations to check
+        set -l locations
+        set -a locations "$container_path/Library/Application Support"
+        set -a locations "$container_path/Library"
+        set -a locations "$container_path/Documents"
 
-# Check if the Application Support directory was found
-if not test -d "$app_support_directory"
-    echo "Application Support directory not found for bundle identifier: $bundle_identifier"
-    set_color normal
-    exit 1
+        for loc in $locations
+            set -l sqlite_files (find $loc -name "*.sqlite" 2>/dev/null)
+            if test -n "$sqlite_files"
+                echo "Found SQLite files in: $loc"
+                echo "Files:"
+                for file in $sqlite_files
+                    echo "- "(basename $file)
+                end
+                echo "Opening directory..."
+                open "$loc"
+                exit 0
+            end
+        end
+    end
 end
 
-# Locate .sqlite files within the Application Support directory, excluding httpstorages.sqlite
-echo "Searching for SQLite databases for $bundle_identifier in the active iOS Simulator..."
-set_color green
-find $app_support_directory -name '*.sqlite' -not -name 'httpstorages.sqlite'
-set_color normal
+# Fallback method (only for SQLite search)
+if test $open_documents -eq 0
+    set -l base_path "$HOME/Library/Developer/CoreSimulator/Devices/$device_id/data/Containers/Data/Application"
+    for app_dir in $base_path/*/
+        if test -d $app_dir
+            set -l found_files (find $app_dir -name "*.sqlite" 2>/dev/null)
+            if test -n "$found_files"
+                echo "Found SQLite files in: $app_dir"
+                echo "Files:"
+                for file in $found_files
+                    echo "- "(basename $file)
+                end
+                set -l dir_path (dirname $found_files[1])
+                echo "Opening directory..."
+                open "$dir_path"
+                exit 0
+            end
+        end
+    end
+end
 
-# Open the Application Support directory in Finder
-echo "Opening the Application Support directory in Finder."
-open "$app_support_directory"
-
+if test $open_documents -eq 1
+    echo "Could not find Documents directory for bundle ID: $bundle_id"
+else
+    echo "No SQLite files found for bundle ID: $bundle_id"
+end
+exit 1
